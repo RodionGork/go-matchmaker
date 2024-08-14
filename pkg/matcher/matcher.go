@@ -1,11 +1,17 @@
 package matcher
 
 import (
+    _ "embed"
     "fmt"
     "time"
 
+    "github.com/Shopify/go-lua"
+
     "github.com/rodiongork/go-matchmaker/pkg/utils"
 )
+
+//go:embed simple_matcher.lua
+var simpleLuaMatcher string
 
 type QueueElem struct {
     Name string
@@ -68,19 +74,93 @@ func (m *Matcher) purgatoryToQueue() {
     }
 }
 
-func (m *Matcher) makeGroups() []*Group {
-    groups := make([]*Group, 0)
-    for len(m.queue) >= m.groupSize {
+func (m *Matcher) makeGroupsAndReduceQueue(groupCount int, groupIndices []int, ts float64) []*Group {
+    groups := make([]*Group, groupCount)
+    for i := 0; i < groupCount; i++ {
         m.groupCounter++
-        g := &Group{
+        groups[i] = &Group {
             Id: m.groupCounter,
-            Time: utils.UnixTimeAsFloat(),
-            Members: m.queue[0:m.groupSize], // we may want to clone here
+            Members: make([]*QueueElem, 0, m.groupSize),
+            Time: ts,
         }
-        m.queue = m.queue[m.groupSize:]
-        groups = append(groups, g)
     }
+    newQueue := make([]*QueueElem, 0, len(m.queue) - groupCount * m.groupSize)
+    for i := 0; i < len(m.queue); i++ {
+        g := groupIndices[i] - 1
+        if g >= 0 {
+            groups[g].Members = append(groups[g].Members, m.queue[i])
+        } else {
+            newQueue = append(newQueue, m.queue[i])
+        }
+    }
+    m.queue = newQueue
     return groups
+}
+
+// return count of groups created from N queue elements
+// and array of N indices, telling which element goes to which group (-1 means not groupped)
+func (m *Matcher) GroupThem(queue []*QueueElem, ts float64) (groupCount int, indices []int) {
+    groupCount = len(queue) / m.groupSize
+    indices = make([]int, len(queue))
+    for i := 0; i < groupCount * m.groupSize; i++ {
+        indices[i] = i / m.groupSize
+    }
+    for i := groupCount * m.groupSize; i < len(indices); i++ {
+        indices[i] = -1
+    }
+    return
+}
+
+func groupThemWithLua(groupSize int, queue []*QueueElem, ts float64) (groupCount int, indices []int) {
+    st := lua.NewState()
+    lua.OpenLibraries(st)
+    st.PushInteger(groupSize)
+    st.SetGlobal("group_size")
+    st.CreateTable(len(queue), 0)
+    for i, user := range queue {
+        st.PushInteger(i + 1)
+        st.CreateTable(4, 0)
+        st.PushInteger(1)
+        st.PushNumber(user.Skill)
+        st.SetTable(-3)
+        st.PushInteger(2)
+        st.PushNumber(user.Latency)
+        st.SetTable(-3)
+        st.PushInteger(3)
+        st.PushNumber(ts - user.Time)
+        st.SetTable(-3)
+        st.SetTable(-3)
+    }
+    st.SetGlobal("users")
+    err := lua.DoString(st, simpleLuaMatcher)
+    if err != nil {
+        fmt.Println("Error on Matching:", err.Error())
+    }
+    grpIdx := make([]int, len(queue))
+    st.Global("users")
+    for i, _ := range queue {
+        st.PushInteger(i + 1)
+        st.Table(-2)
+        if st.TypeOf(-1) != lua.TypeTable {
+            v, _ := st.ToNumber(-1)
+            fmt.Println("Error on retrieve match results from 'groups' - table broken", v);
+        }
+        st.PushInteger(4)
+        st.Table(-2)
+        v, ok := st.ToInteger(-1)
+        if !ok {
+            fmt.Println("Error on retrieve match results from 'users' - not int");
+        }
+        grpIdx[i] = v
+        st.Pop(2)
+    }
+    st.Pop(1)
+    st.Global("group_count")
+    grpCnt, ok := st.ToInteger(-1)
+    if !ok {
+        fmt.Println("Error on retrieve match results from 'group_count'");
+    }
+    return grpCnt, grpIdx
 }
 
 func processGroup(group *Group) {
@@ -104,7 +184,9 @@ func (m *Matcher) Run(period int) {
     for true {
         time.Sleep(time.Second * time.Duration(period))
         m.purgatoryToQueue()
-        groups := m.makeGroups()
+        ts := utils.UnixTimeAsFloat()
+        groupCount, groupIndices := groupThemWithLua(m.groupSize, m.queue, ts)
+        groups := m.makeGroupsAndReduceQueue(groupCount, groupIndices, ts)
         if m.debug {
             fmt.Println("Groups created:", len(groups), ", users still waiting:", len(m.queue))
         }
@@ -113,3 +195,4 @@ func (m *Matcher) Run(period int) {
         }
     }
 }
+

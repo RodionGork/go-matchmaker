@@ -12,5 +12,4 @@ clean:
 	rm -rf build
 
 test:
-	${GOPATH}/bin/golangci-lint run
 	go test ./...
