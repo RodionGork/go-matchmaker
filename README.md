@@ -7,11 +7,9 @@ are to be added later.
 
     make build
 
-    GROUP_SIZE=3 TCP_PORT=8085 build/server
+    GROUP_SIZE=3 TCP_PORT=8082 build/server
 
-    curl -d '{"name":"Kitty","skill":14,"latency":2}' http://localhost:8085/users
-    curl -d '{"name":"Patty","skill":13,"latency":3}' http://localhost:8085/users
-    curl -d '{"name":"Clown","skill":12,"latency":4}' http://localhost:8085/users
+    tests/simple10.sh
 
 Initial implementation just combines group when there are enough users in the queue.
 

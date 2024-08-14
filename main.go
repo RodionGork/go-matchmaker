@@ -21,7 +21,7 @@ func usersRequest(body map[string]any) string {
 }
 
 func main() {
-	m = matcher.New(os.Getenv("GROUP_SIZE"))
+	m = matcher.New()
 	network.HandleJSON("/users", usersRequest, usersRequestFields)
 	network.Start(os.Getenv("TCP_PORT"))
 }
