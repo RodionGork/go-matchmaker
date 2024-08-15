@@ -29,7 +29,7 @@ func TestLua(t *testing.T) {
         &QueueElem{Skill:12, Latency:3, Time: 103},
         &QueueElem{Skill:17, Latency:1, Time: 104},
     }
-    cnt, idx := groupThemWithLua(2, groups, 105)
+    cnt, idx := groupThemWithLua(2, groups, 105, simpleLuaMatcher)
     if cnt != 2 {
         t.Error("Group count should be 2 but is", cnt)
     }

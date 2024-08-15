@@ -3,6 +3,7 @@ package matcher
 import (
     _ "embed"
     "fmt"
+    "os"
     "time"
 
     "github.com/Shopify/go-lua"
@@ -31,6 +32,7 @@ type Matcher struct {
     groupCounter int
     purgatory chan *QueueElem
     queue []*QueueElem
+    luaMatcher string
     debug bool
 }
 
@@ -43,11 +45,23 @@ func New() *Matcher {
         groupSize: sz,
         groupCounter: 0,
         queue: []*QueueElem{},
-        purgatory: make(chan *QueueElem, 100),
+        purgatory: make(chan *QueueElem, utils.IntFromEnv("USER_BUFFER", 100)),
+        luaMatcher: loadLuaMatcher(os.Getenv("MATCHER_FILE")),
         debug: utils.IntFromEnv("DEBUG_MATCHER", 0) != 0,
     }
     go m.Run(utils.IntFromEnv("MATCHER_PERIOD", 1))
     return m
+}
+
+func loadLuaMatcher(fileName string) string {
+    if fileName == "" {
+        return ""
+    }
+    data, err := os.ReadFile(fileName)
+    if err != nil {
+        panic("Desired matcher file '" + fileName + "' loading failed: " + err.Error())
+    }
+    return string(data)
 }
 
 func (m *Matcher) Enqueue(name string, skill float64, latency float64) {
@@ -111,7 +125,7 @@ func (m *Matcher) GroupThem(queue []*QueueElem, ts float64) (groupCount int, ind
     return
 }
 
-func groupThemWithLua(groupSize int, queue []*QueueElem, ts float64) (groupCount int, indices []int) {
+func groupThemWithLua(groupSize int, queue []*QueueElem, ts float64, luaCode string) (groupCount int, indices []int) {
     st := lua.NewState()
     lua.OpenLibraries(st)
     st.PushInteger(groupSize)
@@ -120,19 +134,20 @@ func groupThemWithLua(groupSize int, queue []*QueueElem, ts float64) (groupCount
     for i, user := range queue {
         st.PushInteger(i + 1)
         st.CreateTable(4, 0)
-        st.PushInteger(1)
+        st.PushString(user.Name)
+        st.SetField(-2, "name")
         st.PushNumber(user.Skill)
-        st.SetTable(-3)
-        st.PushInteger(2)
+        st.SetField(-2, "skill")
         st.PushNumber(user.Latency)
-        st.SetTable(-3)
-        st.PushInteger(3)
+        st.SetField(-2, "latency")
         st.PushNumber(ts - user.Time)
-        st.SetTable(-3)
+        st.SetField(-2, "time")
+        st.PushInteger(-1)
+        st.SetField(-2, "group")
         st.SetTable(-3)
     }
     st.SetGlobal("users")
-    err := lua.DoString(st, simpleLuaMatcher)
+    err := lua.DoString(st, luaCode)
     if err != nil {
         fmt.Println("Error on Matching:", err.Error())
     }
@@ -145,8 +160,7 @@ func groupThemWithLua(groupSize int, queue []*QueueElem, ts float64) (groupCount
             v, _ := st.ToNumber(-1)
             fmt.Println("Error on retrieve match results from 'groups' - table broken", v);
         }
-        st.PushInteger(4)
-        st.Table(-2)
+        st.Field(-1, "group")
         v, ok := st.ToInteger(-1)
         if !ok {
             fmt.Println("Error on retrieve match results from 'users' - not int");
@@ -185,10 +199,14 @@ func (m *Matcher) Run(period int) {
         time.Sleep(time.Second * time.Duration(period))
         m.purgatoryToQueue()
         ts := utils.UnixTimeAsFloat()
-        groupCount, groupIndices := groupThemWithLua(m.groupSize, m.queue, ts)
+        matcher := simpleLuaMatcher
+        if m.luaMatcher != "" {
+            matcher = m.luaMatcher
+        }
+        groupCount, groupIndices := groupThemWithLua(m.groupSize, m.queue, ts, matcher)
         groups := m.makeGroupsAndReduceQueue(groupCount, groupIndices, ts)
         if m.debug {
-            fmt.Println("Groups created:", len(groups), ", users still waiting:", len(m.queue))
+            fmt.Println("Groups created:", len(groups), "and users still waiting:", len(m.queue))
         }
         for _, g := range groups {
             processGroup(g)
